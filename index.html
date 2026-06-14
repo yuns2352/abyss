@@ -1,0 +1,443 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Abyss — DDGI Light Diver (D1)</title>
+
+  <!-- three.js r182 / WebGPU 빌드. WebGPU 미지원 브라우저에서는 자동으로 WebGL2로 폴백됨. -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.182.0/build/three.webgpu.js",
+      "three/webgpu": "https://cdn.jsdelivr.net/npm/three@0.182.0/build/three.webgpu.js",
+      "three/tsl": "https://cdn.jsdelivr.net/npm/three@0.182.0/build/three.tsl.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.182.0/examples/jsm/"
+    }
+  }
+  </script>
+
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #02060a; }
+    canvas { display: block; }
+
+    /* HUD */
+    #hud {
+      position: fixed; top: 14px; left: 14px;
+      font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+      font-size: 12px; line-height: 1.6; color: #bfe9ff;
+      text-shadow: 0 1px 3px rgba(0,0,0,0.9);
+      pointer-events: none; user-select: none;
+    }
+    #hud b { color: #fff; }
+    #hud .gi-on  { color: #7CFFB2; }
+    #hud .gi-off { color: #ff8a8a; }
+    #hud .key { color: #ffd479; }
+
+    #hint {
+      position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+      font-family: ui-sans-serif, system-ui, sans-serif; font-size: 13px;
+      color: #cfe9ff; background: rgba(4,12,20,0.55); padding: 8px 16px;
+      border-radius: 999px; pointer-events: none; user-select: none;
+      backdrop-filter: blur(4px);
+    }
+    #hint.hidden { display: none; }
+
+    /* 로딩 / 에러 오버레이 */
+    #overlay {
+      position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+      flex-direction: column; gap: 12px; text-align: center;
+      font-family: ui-sans-serif, system-ui, sans-serif; color: #dff;
+      background: radial-gradient(ellipse at center, #06121d 0%, #02060a 70%);
+      z-index: 10;
+    }
+    #overlay h1 { font-size: 20px; font-weight: 600; letter-spacing: 0.5px; }
+    #overlay p  { font-size: 13px; color: #8fb6c9; max-width: 460px; }
+    #overlay.hidden { display: none; }
+    .spinner {
+      width: 26px; height: 26px; border: 3px solid #16384a; border-top-color: #5fd0ff;
+      border-radius: 50%; animation: spin 0.9s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <div id="overlay">
+    <div class="spinner"></div>
+    <h1>Abyss 로딩 중…</h1>
+    <p>WebGPU(또는 WebGL2)를 초기화하는 중입니다. 잠시만 기다려 주세요.</p>
+  </div>
+
+  <div id="hud" style="display:none">
+    <div>ABYSS — <b>DDGI Light Diver</b> · D1</div>
+    <div>GI(간접광): <span id="giState" class="gi-on">ON</span></div>
+    <div>FPS: <span id="fps">–</span> · Backend: <span id="backend">–</span></div>
+    <div style="margin-top:6px; opacity:0.8">
+      <span class="key">WASD</span> 이동 · <span class="key">Space/Shift</span> 상승·하강 ·
+      <span class="key">마우스</span> 시점 · <span class="key">G</span> GI 토글 · <span class="key">H</span> HUD 숨김
+    </div>
+  </div>
+
+  <div id="hint">화면을 클릭해 마우스 시점을 활성화하세요</div>
+
+  <script type="module">
+    import * as THREE from 'three/webgpu';
+
+    // ───────────────────────────────────────────────────────────
+    // 전역 상태
+    // ───────────────────────────────────────────────────────────
+    let renderer, scene, camera, clock;
+    let diver, diverLight, probeCamera, probeRT;
+    const wallMeshes = [];          // 카메라 스프링암 레이캐스트 대상
+    const coral = [];               // 발광 산호 (간접광 소스)
+    const raycaster = new THREE.Raycaster();
+
+    // 챔버 크기 (충돌 클램프에 사용)
+    const ROOM = { w: 30, h: 12, d: 30 };
+    const MARGIN = 1.2;
+
+    // 입력 상태
+    const keys = {};
+    let yaw = 0, pitch = 0.35;      // 카메라 궤도 각도
+    let pointerLocked = false;
+
+    // GI 토글
+    let giEnabled = true;
+    let probeTexture = null;
+
+    // probe 갱신 amortize
+    let frameCount = 0;
+    const PROBE_UPDATE_EVERY = 2;   // 2프레임마다 1회 갱신 (성능 여유)
+
+    // FPS 측정
+    let fpsAccum = 0, fpsFrames = 0, fpsTimer = 0;
+
+    const overlay = document.getElementById('overlay');
+    const hud = document.getElementById('hud');
+
+    // ───────────────────────────────────────────────────────────
+    // 초기화
+    // ───────────────────────────────────────────────────────────
+    async function init() {
+      renderer = new THREE.WebGPURenderer({ antialias: true });
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.toneMapping = THREE.ACESFilmicToneMapping;
+      renderer.toneMappingExposure = 1.05;
+
+      // WebGPU는 비동기 초기화가 필수
+      await renderer.init();
+      document.body.appendChild(renderer.domElement);
+      document.getElementById('backend').textContent =
+        renderer.backend?.isWebGPUBackend ? 'WebGPU' : 'WebGL2';
+
+      scene = new THREE.Scene();
+      scene.background = new THREE.Color(0x02060a);
+      scene.fog = new THREE.FogExp2(0x02080e, 0.035);  // 심해 깊이감
+
+      camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 200);
+      camera.position.set(0, 6, 12);
+
+      clock = new THREE.Clock();
+
+      buildChamber();
+      buildCoral();
+      buildDiver();
+      setupProbe();
+      setupInput();
+
+      window.addEventListener('resize', onResize);
+
+      overlay.classList.add('hidden');
+      hud.style.display = 'block';
+
+      renderer.setAnimationLoop(loop);
+    }
+
+    // ───────────────────────────────────────────────────────────
+    // 동굴 챔버: 바닥/천장/4벽
+    // ───────────────────────────────────────────────────────────
+    function buildChamber() {
+      const mat = new THREE.MeshStandardMaterial({
+        color: 0x223044, roughness: 0.9, metalness: 0.0, envMapIntensity: 1.4,
+      });
+
+      const half = { w: ROOM.w / 2, h: ROOM.h / 2, d: ROOM.d / 2 };
+
+      // 바닥
+      addWall(new THREE.PlaneGeometry(ROOM.w, ROOM.d), mat,
+        [0, 0, 0], [-Math.PI / 2, 0, 0]);
+      // 천장
+      addWall(new THREE.PlaneGeometry(ROOM.w, ROOM.d), mat,
+        [0, ROOM.h, 0], [Math.PI / 2, 0, 0]);
+      // -Z / +Z 벽
+      addWall(new THREE.PlaneGeometry(ROOM.w, ROOM.h), mat,
+        [0, half.h, -half.d], [0, 0, 0]);
+      addWall(new THREE.PlaneGeometry(ROOM.w, ROOM.h), mat,
+        [0, half.h, half.d], [0, Math.PI, 0]);
+      // -X / +X 벽
+      addWall(new THREE.PlaneGeometry(ROOM.d, ROOM.h), mat,
+        [-half.w, half.h, 0], [0, Math.PI / 2, 0]);
+      addWall(new THREE.PlaneGeometry(ROOM.d, ROOM.h), mat,
+        [half.w, half.h, 0], [0, -Math.PI / 2, 0]);
+
+      // 바닥에 약간의 바위 굴곡 (간접광이 닿는 표면을 늘림)
+      const rockMat = new THREE.MeshStandardMaterial({
+        color: 0x2a3a4d, roughness: 1.0, metalness: 0.0, envMapIntensity: 1.2,
+      });
+      for (let i = 0; i < 10; i++) {
+        const r = 0.8 + Math.random() * 1.8;
+        const rock = new THREE.Mesh(new THREE.DodecahedronGeometry(r, 0), rockMat);
+        rock.position.set(
+          (Math.random() - 0.5) * (ROOM.w - 6),
+          r * 0.4,
+          (Math.random() - 0.5) * (ROOM.d - 6)
+        );
+        rock.rotation.set(Math.random(), Math.random(), Math.random());
+        scene.add(rock);
+        wallMeshes.push(rock);
+      }
+    }
+
+    function addWall(geo, mat, pos, rot) {
+      const m = new THREE.Mesh(geo, mat);
+      m.position.set(...pos);
+      m.rotation.set(...rot);
+      scene.add(m);
+      wallMeshes.push(m);
+    }
+
+    // ───────────────────────────────────────────────────────────
+    // 발광 산호: 간접광(color bleeding)의 소스. 직접 조명 없이 emissive만.
+    //   → GI를 끄면 주변에 미치는 빛이 사라지는 게 명확히 보임.
+    // ───────────────────────────────────────────────────────────
+    function buildCoral() {
+      const palette = [0xff2d75, 0xff7a18, 0x18e0ff, 0xb14bff, 0x39ff88];
+      for (let i = 0; i < 14; i++) {
+        const color = palette[i % palette.length];
+        const geo = Math.random() > 0.5
+          ? new THREE.IcosahedronGeometry(0.6 + Math.random() * 0.7, 0)
+          : new THREE.ConeGeometry(0.4 + Math.random() * 0.4, 1.6 + Math.random() * 1.4, 6);
+        const mat = new THREE.MeshStandardMaterial({
+          color: 0x0a0a0a,
+          emissive: new THREE.Color(color),
+          emissiveIntensity: 2.6,           // HDR glow → FloatType probe가 포착
+          roughness: 0.5, metalness: 0.0,
+        });
+        const m = new THREE.Mesh(geo, mat);
+        const edge = Math.random() > 0.4;
+        m.position.set(
+          edge ? (Math.random() > 0.5 ? 1 : -1) * (ROOM.w / 2 - 1.5) : (Math.random() - 0.5) * ROOM.w,
+          0.8 + Math.random() * (edge ? ROOM.h - 2 : 1.5),
+          (Math.random() - 0.5) * (ROOM.d - 3)
+        );
+        scene.add(m);
+        coral.push(m);
+      }
+    }
+
+    // ───────────────────────────────────────────────────────────
+    // 발광 다이버: 플레이어 = 동적 광원. 직접광(PointLight) + emissive 본체.
+    // ───────────────────────────────────────────────────────────
+    function buildDiver() {
+      diver = new THREE.Group();
+      diver.position.set(0, 4, 6);
+
+      const bodyMat = new THREE.MeshStandardMaterial({
+        color: 0x0b1a22, emissive: new THREE.Color(0x6fe9ff),
+        emissiveIntensity: 1.8, roughness: 0.4, metalness: 0.2,
+      });
+      const body = new THREE.Mesh(new THREE.SphereGeometry(0.55, 24, 16), bodyMat);
+      diver.add(body);
+
+      // 발광 코어(더 밝은 중심)
+      const core = new THREE.Mesh(
+        new THREE.SphereGeometry(0.28, 16, 12),
+        new THREE.MeshStandardMaterial({
+          color: 0x000000, emissive: new THREE.Color(0xaffaff), emissiveIntensity: 4.0,
+        })
+      );
+      diver.add(core);
+
+      // 지느러미(방향 식별용)
+      const finMat = new THREE.MeshStandardMaterial({
+        color: 0x12303d, emissive: new THREE.Color(0x2aa6c4), emissiveIntensity: 0.8,
+        roughness: 0.6,
+      });
+      const fin = new THREE.Mesh(new THREE.ConeGeometry(0.35, 1.0, 4), finMat);
+      fin.rotation.x = Math.PI / 2;
+      fin.position.z = -0.7;
+      diver.add(fin);
+
+      // 직접광: 다이버가 들고 다니는 빛 (GI off여도 길찾기는 가능)
+      diverLight = new THREE.PointLight(0x9fe9ff, 40, 26, 1.6);
+      diver.add(diverLight);
+
+      scene.add(diver);
+    }
+
+    // ───────────────────────────────────────────────────────────
+    // 단일 PROBE (= DDGI의 씨앗)
+    //   CubeCamera로 다이버 위치에서 씬을 캡처 → scene.environment로 주입.
+    //   → 산호/다이버의 빛이 주변 표면에 diffuse 간접광으로 번짐(color bleeding).
+    //   D2에서 이 probe를 "그리드"로 확장하고 octahedral 인코딩으로 발전시킴.
+    // ───────────────────────────────────────────────────────────
+    function setupProbe() {
+      // FloatType: 밝은 emissive(>1.0)를 클램프하지 않고 보존
+      probeRT = new THREE.WebGLCubeRenderTarget(128, { type: THREE.HalfFloatType });
+      probeTexture = probeRT.texture;
+      probeCamera = new THREE.CubeCamera(0.3, 60, probeRT);
+      scene.add(probeCamera);
+
+      scene.environment = probeTexture;   // GI ON 상태
+    }
+
+    function updateProbe() {
+      // 다이버 위치에서 환경 캡처 (다이버 본체는 잠시 숨겨 자기 자신 과노출 방지)
+      diver.visible = false;
+      probeCamera.position.copy(diver.position);
+      probeCamera.update(renderer, scene);
+      diver.visible = true;
+    }
+
+    // ───────────────────────────────────────────────────────────
+    // 입력
+    // ───────────────────────────────────────────────────────────
+    function setupInput() {
+      window.addEventListener('keydown', (e) => {
+        keys[e.code] = true;
+        if (e.code === 'KeyG') toggleGI();
+        if (e.code === 'KeyH') hud.style.display = (hud.style.display === 'none') ? 'block' : 'none';
+      });
+      window.addEventListener('keyup', (e) => { keys[e.code] = false; });
+
+      const canvas = renderer.domElement;
+      canvas.addEventListener('click', () => canvas.requestPointerLock());
+      document.addEventListener('pointerlockchange', () => {
+        pointerLocked = (document.pointerLockElement === canvas);
+        document.getElementById('hint').classList.toggle('hidden', pointerLocked);
+      });
+      document.addEventListener('mousemove', (e) => {
+        if (!pointerLocked) return;
+        yaw   -= e.movementX * 0.0025;
+        pitch -= e.movementY * 0.0025;
+        pitch = Math.max(-0.2, Math.min(1.25, pitch));
+      });
+    }
+
+    function toggleGI() {
+      giEnabled = !giEnabled;
+      scene.environment = giEnabled ? probeTexture : null;
+      const el = document.getElementById('giState');
+      el.textContent = giEnabled ? 'ON' : 'OFF';
+      el.className = giEnabled ? 'gi-on' : 'gi-off';
+    }
+
+    // ───────────────────────────────────────────────────────────
+    // 매 프레임 업데이트
+    // ───────────────────────────────────────────────────────────
+    function update(dt) {
+      // 이동 방향: 카메라 yaw 기준
+      const speed = (keys['ShiftLeft'] || keys['ShiftRight'] ? 9 : 6);
+      const forward = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
+      const right = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
+      const move = new THREE.Vector3();
+
+      if (keys['KeyW']) move.add(forward);
+      if (keys['KeyS']) move.sub(forward);
+      if (keys['KeyD']) move.add(right);
+      if (keys['KeyA']) move.sub(right);
+      if (keys['Space']) move.y += 1;
+      if (keys['ShiftLeft'] || keys['ShiftRight']) { /* 가속만 */ }
+      if (keys['ControlLeft'] || keys['KeyC']) move.y -= 1;
+
+      if (move.lengthSq() > 0) {
+        move.normalize().multiplyScalar(speed * dt);
+        diver.position.add(move);
+      }
+
+      // 챔버 경계 클램프 (단순·견고한 충돌)
+      const h = { w: ROOM.w / 2 - MARGIN, d: ROOM.d / 2 - MARGIN };
+      diver.position.x = THREE.MathUtils.clamp(diver.position.x, -h.w, h.w);
+      diver.position.z = THREE.MathUtils.clamp(diver.position.z, -h.d, h.d);
+      diver.position.y = THREE.MathUtils.clamp(diver.position.y, 1.0, ROOM.h - 1.0);
+
+      // 다이버 살짝 부유 애니메이션
+      diver.children[0].position.y = Math.sin(performance.now() * 0.002) * 0.08;
+
+      updateCamera(dt);
+    }
+
+    // 3인칭 스프링암 카메라 + 벽 레이캐스트 충돌
+    function updateCamera(dt) {
+      const target = diver.position.clone().add(new THREE.Vector3(0, 0.6, 0));
+      const dist = 7;
+      const dir = new THREE.Vector3(
+        Math.sin(yaw) * Math.cos(pitch),
+        Math.sin(pitch),
+        Math.cos(yaw) * Math.cos(pitch)
+      );
+      let desired = target.clone().add(dir.clone().multiplyScalar(dist));
+
+      // 카메라가 벽을 뚫지 않도록 당겨오기
+      raycaster.set(target, dir);
+      raycaster.far = dist;
+      const hits = raycaster.intersectObjects(wallMeshes, false);
+      if (hits.length > 0) {
+        desired = target.clone().add(dir.clone().multiplyScalar(Math.max(1.2, hits[0].distance - 0.4)));
+      }
+
+      // 부드러운 추적
+      camera.position.lerp(desired, 1 - Math.pow(0.0015, dt));
+      camera.lookAt(target);
+    }
+
+    // ───────────────────────────────────────────────────────────
+    // 루프
+    // ───────────────────────────────────────────────────────────
+    function loop() {
+      const dt = Math.min(clock.getDelta(), 0.05);
+      frameCount++;
+
+      update(dt);
+
+      // probe 갱신 (GI ON일 때만, amortize)
+      if (giEnabled && frameCount % PROBE_UPDATE_EVERY === 0) {
+        updateProbe();
+      }
+
+      renderer.render(scene, camera);
+      updateFPS(dt);
+    }
+
+    function updateFPS(dt) {
+      fpsAccum += dt; fpsFrames++; fpsTimer += dt;
+      if (fpsTimer >= 0.5) {
+        const fps = Math.round(fpsFrames / fpsAccum);
+        document.getElementById('fps').textContent = fps;
+        fpsAccum = 0; fpsFrames = 0; fpsTimer = 0;
+      }
+    }
+
+    function onResize() {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    }
+
+    // ───────────────────────────────────────────────────────────
+    // 시작 + 에러 처리
+    // ───────────────────────────────────────────────────────────
+    init().catch((err) => {
+      console.error(err);
+      overlay.classList.remove('hidden');
+      overlay.innerHTML =
+        '<h1>초기화 실패</h1>' +
+        '<p>WebGPU/WebGL 초기화 중 오류가 발생했습니다. 최신 Chrome 또는 Edge에서, ' +
+        '로컬 웹서버로 실행했는지 확인해 주세요. 콘솔 메시지를 알려주시면 같이 고칠게요.<br><br>' +
+        '<code style="color:#ff9a9a">' + (err?.message || err) + '</code></p>';
+    });
+  </script>
+</body>
+</html>
