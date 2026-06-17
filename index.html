@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Abyss — DDGI Light Diver (D2: Probe Grid)</title>
+  <title>Abyss — DDGI Light Diver (D3: Visibility)</title>
 
   <script type="importmap">
   {
@@ -20,28 +20,19 @@
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { width: 100%; height: 100%; overflow: hidden; background: #02060a; }
     canvas { display: block; }
-    #hud {
-      position: fixed; top: 14px; left: 14px;
-      font-family: ui-monospace, Menlo, monospace; font-size: 12px; line-height: 1.6;
-      color: #bfe9ff; text-shadow: 0 1px 3px rgba(0,0,0,0.9);
-      pointer-events: none; user-select: none;
-    }
+    #hud { position: fixed; top: 14px; left: 14px; font-family: ui-monospace, Menlo, monospace;
+      font-size: 12px; line-height: 1.6; color: #bfe9ff; text-shadow: 0 1px 3px rgba(0,0,0,0.9);
+      pointer-events: none; user-select: none; }
     #hud b { color: #fff; }
-    .gi-on { color: #7CFFB2; } .gi-off { color: #ff8a8a; }
-    .key { color: #ffd479; }
-    #hint {
-      position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+    .on { color: #7CFFB2; } .off { color: #ff8a8a; } .key { color: #ffd479; }
+    #hint { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
       font-family: ui-sans-serif, system-ui, sans-serif; font-size: 13px; color: #cfe9ff;
       background: rgba(4,12,20,0.55); padding: 8px 16px; border-radius: 999px;
-      pointer-events: none; user-select: none; backdrop-filter: blur(4px);
-    }
+      pointer-events: none; user-select: none; backdrop-filter: blur(4px); }
     #hint.hidden { display: none; }
-    #overlay {
-      position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
-      flex-direction: column; gap: 12px; text-align: center;
-      font-family: ui-sans-serif, system-ui, sans-serif; color: #dff;
-      background: radial-gradient(ellipse at center, #06121d 0%, #02060a 70%); z-index: 10;
-    }
+    #overlay { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+      flex-direction: column; gap: 12px; text-align: center; font-family: ui-sans-serif, system-ui, sans-serif;
+      color: #dff; background: radial-gradient(ellipse at center, #06121d 0%, #02060a 70%); z-index: 10; }
     #overlay h1 { font-size: 20px; font-weight: 600; }
     #overlay p { font-size: 13px; color: #8fb6c9; max-width: 460px; }
     #overlay.hidden { display: none; }
@@ -54,16 +45,16 @@
   <div id="overlay">
     <div class="spinner"></div>
     <h1>Abyss 로딩 중…</h1>
-    <p>probe 그리드를 초기화하는 중입니다.</p>
+    <p>probe 가시성을 계산하는 중입니다.</p>
   </div>
 
   <div id="hud" style="display:none">
-    <div>ABYSS — <b>DDGI Light Diver</b> · D2 (Probe Grid)</div>
-    <div>GI: <span id="giState" class="gi-on">ON</span> · Probes: <span id="probeCount">–</span> · Probe뷰: <span id="probeView">OFF</span></div>
-    <div>FPS: <span id="fps">–</span> · Backend: <span id="backend">–</span></div>
+    <div>ABYSS — <b>DDGI Light Diver</b> · D3 (Visibility)</div>
+    <div>GI: <span id="giState" class="on">ON</span> · 가시성: <span id="visState" class="on">ON</span> · Probe뷰: <span id="probeView">OFF</span></div>
+    <div>Probes: <span id="probeCount">–</span> · FPS: <span id="fps">–</span> · <span id="backend">–</span></div>
     <div style="margin-top:6px; opacity:0.8">
       <span class="key">WASD</span> 이동 · <span class="key">Space/C</span> 상하 · <span class="key">마우스</span> 시점 ·
-      <span class="key">G</span> GI · <span class="key">P</span> probe보기 · <span class="key">H</span> HUD
+      <span class="key">G</span> GI · <span class="key">V</span> 가시성 · <span class="key">P</span> probe · <span class="key">H</span> HUD
     </div>
   </div>
 
@@ -72,44 +63,38 @@
   <script type="module">
     import * as THREE from 'three/webgpu';
 
-    // ── 전역 ──────────────────────────────────────────────
-    let renderer, scene, camera, clock;
-    let diver, diverLight;
-    const wallMeshes = [];           // 카메라 레이캐스트 대상
-    const giMaterials = [];          // GI(envMap) 적용 머티리얼 — 토글에 사용
+    // ── 전역 ──
+    let renderer, scene, camera, clock, diver, diverLight;
+    const wallMeshes = [];     // 카메라 레이캐스트
+    const giMeshes = [];       // probe envMap을 받는 메시 (벽 타일·바위·칸막이)
+    const giMaterials = [];    // GI 토글용
+    const occluders = [];      // 가시성 테스트용 차폐물 (칸막이)
     const raycaster = new THREE.Raycaster();
 
-    const ROOM = { w: 30, h: 12, d: 30 };
+    const ROOM = { w: 36, h: 12, d: 24 };
     const MARGIN = 1.2;
     const GI_INTENSITY = 1.6;
+    const DOOR_HALF = 3.0;     // 칸막이 출입구 절반폭 (z∈[-3,3] 개방)
 
-    // probe 그리드 설정
-    const GRID = { x: 4, y: 2, z: 4 };       // = 32 probes
-    const PROBE_RES = 64;                      // probe 큐브맵 해상도 (irradiance는 저주파라 작아도 됨)
-    const PROBE_BOUNDS = { x: [-12, 12], y: [2, 10], z: [-12, 12] };
-    const UPDATE_NEAR = 4;                     // 매 프레임 갱신할 "가까운 probe" 수
-    let rrCursor = 0;                          // 나머지 probe를 천천히 갱신하는 라운드로빈 커서
+    const GRID = { x: 6, y: 2, z: 4 };   // = 48 probes (두 구역에 충분히 분포)
+    const PROBE_RES = 64;
+    const PB = { x: [-15, 15], y: [2, 10], z: [-9, 9] };
+    const UPDATE_NEAR = 4;
+    let rrCursor = 0;
+    let probes = [], probeViz, probeViewOn = false;
 
-    let probes = [];                           // { pos, rt, cam }
-    let probeViz;                              // 시각화 구체 그룹
-    let probeViewOn = false;
-
-    // 입력 / 카메라
     const keys = {};
     let yaw = 0, pitch = 0.35, pointerLocked = false;
-    let giEnabled = true;
-
-    // FPS
+    let giEnabled = true, visAware = true;
     let fpsAccum = 0, fpsFrames = 0, fpsTimer = 0;
 
     const overlay = document.getElementById('overlay');
     const hud = document.getElementById('hud');
 
-    // ── 초기화 ────────────────────────────────────────────
     async function init() {
       renderer = new THREE.WebGPURenderer({ antialias: true });
       renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.setSize(innerWidth, innerHeight);
       renderer.toneMapping = THREE.ACESFilmicToneMapping;
       renderer.toneMappingExposure = 1.05;
       await renderer.init();
@@ -119,19 +104,20 @@
 
       scene = new THREE.Scene();
       scene.background = new THREE.Color(0x02060a);
-      scene.fog = new THREE.FogExp2(0x02080e, 0.035);
-
+      scene.fog = new THREE.FogExp2(0x02080e, 0.04);
       camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 200);
-      camera.position.set(0, 6, 12);
+      camera.position.set(8, 6, 12);
       clock = new THREE.Clock();
 
-      buildProbeGrid();   // probe 먼저 — 표면이 가까운 probe를 참조해야 하므로
+      buildProbeGrid();
+      buildDivider();      // 차폐물 먼저 (가시성 할당 전에 존재해야 함)
       buildChamber();
       buildCoral();
       buildDiver();
+      assignAllProbes();   // 모든 GI 메시에 "가장 가까운 + 시야 확보된" probe 할당
       buildProbeViz();
       setupInput();
-      window.addEventListener('resize', onResize);
+      addEventListener('resize', onResize);
 
       document.getElementById('probeCount').textContent = probes.length;
       overlay.classList.add('hidden');
@@ -139,196 +125,186 @@
       renderer.setAnimationLoop(loop);
     }
 
-    // ── probe 그리드 ──────────────────────────────────────
-    // 규칙적인 3D 격자로 probe 배치. 각 probe는 자기 위치에서 씬을 캡처(큐브맵).
+    // ── probe 그리드 ──
     function buildProbeGrid() {
       probes = [];
-      for (let ix = 0; ix < GRID.x; ix++) {
-        for (let iy = 0; iy < GRID.y; iy++) {
+      for (let ix = 0; ix < GRID.x; ix++)
+        for (let iy = 0; iy < GRID.y; iy++)
           for (let iz = 0; iz < GRID.z; iz++) {
             const pos = new THREE.Vector3(
-              lerpGrid(PROBE_BOUNDS.x, ix, GRID.x),
-              lerpGrid(PROBE_BOUNDS.y, iy, GRID.y),
-              lerpGrid(PROBE_BOUNDS.z, iz, GRID.z)
-            );
+              lg(PB.x, ix, GRID.x), lg(PB.y, iy, GRID.y), lg(PB.z, iz, GRID.z));
             const rt = new THREE.WebGLCubeRenderTarget(PROBE_RES, { type: THREE.HalfFloatType });
             const cam = new THREE.CubeCamera(0.3, 60, rt);
             cam.position.copy(pos);
             scene.add(cam);
             probes.push({ pos, rt, cam });
           }
-        }
-      }
     }
-    function lerpGrid(range, i, n) {
-      return n <= 1 ? (range[0] + range[1]) / 2 : range[0] + (range[1] - range[0]) * (i / (n - 1));
-    }
-    // 규칙 격자라 가장 가까운 probe는 인덱스 계산으로 O(1)
-    function nearestProbe(p) {
-      const idx = (range, v, n) => {
-        if (n <= 1) return 0;
-        const t = (v - range[0]) / (range[1] - range[0]);
-        return Math.max(0, Math.min(n - 1, Math.round(t * (n - 1))));
-      };
-      const ix = idx(PROBE_BOUNDS.x, p.x, GRID.x);
-      const iy = idx(PROBE_BOUNDS.y, p.y, GRID.y);
-      const iz = idx(PROBE_BOUNDS.z, p.z, GRID.z);
-      return probes[(ix * GRID.y + iy) * GRID.z + iz];
+    const lg = (r, i, n) => n <= 1 ? (r[0]+r[1])/2 : r[0] + (r[1]-r[0]) * (i/(n-1));
+
+    // ── 칸막이: 두 구역으로 분리 + 가시성 차폐물 ──
+    function buildDivider() {
+      const mat = giMat(0x1c2836, 0.95);
+      mat.side = THREE.DoubleSide;
+      // 출입구(z∈[-3,3])를 제외한 두 세그먼트
+      [[-9, 12], [9, 12]].forEach(([zc, w]) => {
+        const seg = new THREE.Mesh(new THREE.PlaneGeometry(w, ROOM.h), mat);
+        seg.position.set(0, ROOM.h / 2, zc);
+        seg.rotation.y = Math.PI / 2;     // 법선이 ±X (칸막이)
+        seg.updateMatrixWorld(true);
+        scene.add(seg);
+        giMeshes.push(seg);
+        wallMeshes.push(seg);
+        occluders.push(seg);              // 이 메시가 빛샘을 막는 차폐물
+      });
+      // 출입구 테두리(시각적 표시, 약한 발광)
+      const frameMat = new THREE.MeshStandardMaterial({
+        color: 0x0a1a22, emissive: new THREE.Color(0x1f7a8c), emissiveIntensity: 0.7, roughness: 0.6 });
+      [-DOOR_HALF, DOOR_HALF].forEach((z) => {
+        const post = new THREE.Mesh(new THREE.BoxGeometry(0.25, ROOM.h, 0.25), frameMat);
+        post.position.set(0, ROOM.h / 2, z);
+        scene.add(post);
+      });
     }
 
-    // ── 동굴: 면을 타일로 분할 → 타일마다 가까운 probe를 샘플 → 공간별 GI 변화 ──
+    // ── 동굴 외벽(타일) ──
     function buildChamber() {
-      const half = { w: ROOM.w / 2, h: ROOM.h / 2, d: ROOM.d / 2 };
+      const half = { w: ROOM.w/2, h: ROOM.h/2, d: ROOM.d/2 };
       const base = { color: 0x223044, roughness: 0.92 };
-      tiledSurface(ROOM.w, ROOM.d, 6, 6, [0, 0, 0],        [-Math.PI/2, 0, 0], base); // 바닥
-      tiledSurface(ROOM.w, ROOM.d, 4, 4, [0, ROOM.h, 0],   [ Math.PI/2, 0, 0], base); // 천장
-      tiledSurface(ROOM.w, ROOM.h, 6, 3, [0, half.h, -half.d], [0, 0, 0], base);
-      tiledSurface(ROOM.w, ROOM.h, 6, 3, [0, half.h,  half.d], [0, Math.PI, 0], base);
-      tiledSurface(ROOM.d, ROOM.h, 6, 3, [-half.w, half.h, 0], [0,  Math.PI/2, 0], base);
-      tiledSurface(ROOM.d, ROOM.h, 6, 3, [ half.w, half.h, 0], [0, -Math.PI/2, 0], base);
+      tiled(ROOM.w, ROOM.d, 8, 5, [0,0,0],          [-Math.PI/2,0,0], base);
+      tiled(ROOM.w, ROOM.d, 6, 4, [0,ROOM.h,0],      [ Math.PI/2,0,0], base);
+      tiled(ROOM.w, ROOM.h, 8, 3, [0,half.h,-half.d],[0,0,0], base);
+      tiled(ROOM.w, ROOM.h, 8, 3, [0,half.h, half.d],[0,Math.PI,0], base);
+      tiled(ROOM.d, ROOM.h, 5, 3, [-half.w,half.h,0],[0, Math.PI/2,0], base);
+      tiled(ROOM.d, ROOM.h, 5, 3, [ half.w,half.h,0],[0,-Math.PI/2,0], base);
 
-      // 바위 (간접광을 받는 입체 표면)
-      for (let i = 0; i < 9; i++) {
-        const r = 0.8 + Math.random() * 1.6;
-        const mat = giMat(0x2a3a4d, 1.0);
-        const rock = new THREE.Mesh(new THREE.DodecahedronGeometry(r, 0), mat);
+      for (let i = 0; i < 10; i++) {
+        const r = 0.8 + Math.random()*1.5;
+        const rock = new THREE.Mesh(new THREE.DodecahedronGeometry(r, 0), giMat(0x2a3a4d, 1.0));
         rock.position.set((Math.random()-0.5)*(ROOM.w-6), r*0.45, (Math.random()-0.5)*(ROOM.d-6));
         rock.rotation.set(Math.random(), Math.random(), Math.random());
-        scene.add(rock);
-        wallMeshes.push(rock);
-        assignProbe(rock);
+        scene.add(rock); giMeshes.push(rock); wallMeshes.push(rock);
       }
     }
-
-    // GI용 머티리얼 (envMap은 나중에 가까운 probe로 채움)
     function giMat(color, rough) {
-      const m = new THREE.MeshStandardMaterial({
-        color, roughness: rough, metalness: 0.0, envMapIntensity: GI_INTENSITY,
-      });
-      giMaterials.push(m);
-      return m;
+      const m = new THREE.MeshStandardMaterial({ color, roughness: rough, metalness: 0.0, envMapIntensity: GI_INTENSITY });
+      giMaterials.push(m); return m;
     }
-
-    // 한 면을 segW×segH 타일로 만들어 그룹으로 반환(씬에 추가)
-    function tiledSurface(W, H, segW, segH, pos, rot, base) {
-      const group = new THREE.Group();
-      group.position.set(...pos);
-      group.rotation.set(...rot);
-      const tw = W / segW, th = H / segH;
-      const geo = new THREE.PlaneGeometry(tw, th);
-      for (let i = 0; i < segW; i++) {
-        for (let j = 0; j < segH; j++) {
-          const mat = giMat(base.color, base.roughness);
-          const tile = new THREE.Mesh(geo, mat);
-          tile.position.set(-W/2 + (i + 0.5) * tw, -H/2 + (j + 0.5) * th, 0);
-          group.add(tile);
-          wallMeshes.push(tile);
-        }
+    function tiled(W, H, sw, sh, pos, rot, base) {
+      const g = new THREE.Group(); g.position.set(...pos); g.rotation.set(...rot);
+      const tw = W/sw, th = H/sh, geo = new THREE.PlaneGeometry(tw, th);
+      for (let i = 0; i < sw; i++) for (let j = 0; j < sh; j++) {
+        const tile = new THREE.Mesh(geo, giMat(base.color, base.roughness));
+        tile.position.set(-W/2 + (i+0.5)*tw, -H/2 + (j+0.5)*th, 0);
+        g.add(tile); giMeshes.push(tile); wallMeshes.push(tile);
       }
-      scene.add(group);
-      group.updateMatrixWorld(true);
-      // 월드 좌표 기준으로 가까운 probe 할당
-      group.children.forEach(assignProbe);
-      return group;
+      scene.add(g); g.updateMatrixWorld(true);
     }
 
-    function assignProbe(mesh) {
+    // ── 가시성 기반 probe 할당 ──
+    // 각 표면에 대해: ① 거리순 정렬 ② 시야가 막히지 않은 가장 가까운 probe 선택
+    //   → 칸막이 너머 probe는 제외되어 빛샘(light leak)이 사라진다.
+    //   naive(가장 가까운) / visible(시야 확보) 두 텍스처를 저장해 V로 비교 가능.
+    function assignAllProbes() {
       const wp = new THREE.Vector3();
-      mesh.getWorldPosition(wp);
-      const pr = nearestProbe(wp);
-      mesh.material.envMap = pr.rt.texture;     // 이 표면은 가장 가까운 probe의 GI를 받음
+      giMeshes.forEach((mesh) => {
+        mesh.getWorldPosition(wp);
+        const ordered = probes
+          .map((p) => ({ p, d: p.pos.distanceToSquared(wp) }))
+          .sort((a, b) => a.d - b.d);
+        const naive = ordered[0].p;
+        let visible = naive;
+        for (const { p } of ordered) {
+          if (hasLineOfSight(wp, p.pos, mesh)) { visible = p; break; }
+        }
+        mesh.userData.naiveTex = naive.rt.texture;
+        mesh.userData.visTex = visible.rt.texture;
+        mesh.material.envMap = visAware ? visible.rt.texture : naive.rt.texture;
+      });
+    }
+    function hasLineOfSight(from, to, selfMesh) {
+      const dir = new THREE.Vector3().subVectors(to, from);
+      const dist = dir.length();
+      dir.normalize();
+      const origin = from.clone().addScaledVector(dir, 0.15); // 표면 자기교차 방지
+      raycaster.set(origin, dir);
+      raycaster.far = dist - 0.15;
+      const hits = raycaster.intersectObjects(occluders.filter((o) => o !== selfMesh), false);
+      return hits.length === 0;
     }
 
-    // ── 발광 산호 (간접광 소스) ──────────────────────────
     function buildCoral() {
       const palette = [0xff2d75, 0xff7a18, 0x18e0ff, 0xb14bff, 0x39ff88];
-      for (let i = 0; i < 14; i++) {
+      for (let i = 0; i < 16; i++) {
         const color = palette[i % palette.length];
         const geo = Math.random() > 0.5
           ? new THREE.IcosahedronGeometry(0.6 + Math.random()*0.7, 0)
           : new THREE.ConeGeometry(0.4 + Math.random()*0.4, 1.6 + Math.random()*1.4, 6);
-        const mat = new THREE.MeshStandardMaterial({
+        const m = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({
           color: 0x0a0a0a, emissive: new THREE.Color(color), emissiveIntensity: 2.6,
-          roughness: 0.5, metalness: 0.0,
-        });
-        const m = new THREE.Mesh(geo, mat);
-        const edge = Math.random() > 0.4;
-        m.position.set(
-          edge ? (Math.random()>0.5?1:-1)*(ROOM.w/2-1.5) : (Math.random()-0.5)*ROOM.w,
-          0.8 + Math.random()*(edge ? ROOM.h-2 : 1.5),
-          (Math.random()-0.5)*(ROOM.d-3)
-        );
+          roughness: 0.5, metalness: 0.0 }));
+        // 한쪽 구역에 더 많은 산호를 둬서 빛샘 대비가 잘 보이게
+        const side = Math.random() > 0.35 ? 1 : -1;
+        m.position.set(side * (3 + Math.random()*(ROOM.w/2 - 4)),
+          0.8 + Math.random()*(ROOM.h-3), (Math.random()-0.5)*(ROOM.d-3));
         scene.add(m);
       }
     }
 
-    // ── 발광 다이버 = 동적 광원 (직접광 + 간접광 소스) ──
     function buildDiver() {
       diver = new THREE.Group();
-      diver.position.set(0, 4, 6);
-      const body = new THREE.Mesh(new THREE.SphereGeometry(0.55, 24, 16),
+      diver.position.set(8, 4, 4);
+      diver.add(new THREE.Mesh(new THREE.SphereGeometry(0.55, 24, 16),
         new THREE.MeshStandardMaterial({ color: 0x0b1a22, emissive: new THREE.Color(0x6fe9ff),
-          emissiveIntensity: 1.6, roughness: 0.4, metalness: 0.2 }));
-      diver.add(body);
-      const core = new THREE.Mesh(new THREE.SphereGeometry(0.28, 16, 12),
+          emissiveIntensity: 1.6, roughness: 0.4, metalness: 0.2 })));
+      diver.add(new THREE.Mesh(new THREE.SphereGeometry(0.28, 16, 12),
         new THREE.MeshStandardMaterial({ color: 0x000000, emissive: new THREE.Color(0xaffaff),
-          emissiveIntensity: 3.2 }));
-      diver.add(core);
+          emissiveIntensity: 3.2 })));
       const fin = new THREE.Mesh(new THREE.ConeGeometry(0.35, 1.0, 4),
         new THREE.MeshStandardMaterial({ color: 0x12303d, emissive: new THREE.Color(0x2aa6c4),
           emissiveIntensity: 0.8, roughness: 0.6 }));
       fin.rotation.x = Math.PI/2; fin.position.z = -0.7; diver.add(fin);
-
-      diverLight = new THREE.PointLight(0x9fe9ff, 40, 26, 1.6);
+      diverLight = new THREE.PointLight(0x9fe9ff, 40, 28, 1.6);
       diver.add(diverLight);
       scene.add(diver);
     }
 
-    // ── probe 시각화: 각 probe가 캡처한 환경을 거울 구체로 표시 (P 토글) ──
     function buildProbeViz() {
-      probeViz = new THREE.Group();
-      probeViz.visible = false;
+      probeViz = new THREE.Group(); probeViz.visible = false;
       const geo = new THREE.SphereGeometry(0.22, 16, 12);
       probes.forEach((pr) => {
-        const mat = new THREE.MeshStandardMaterial({
-          metalness: 1.0, roughness: 0.08, envMap: pr.rt.texture, envMapIntensity: 1.0,
-        });
-        const s = new THREE.Mesh(geo, mat);
-        s.position.copy(pr.pos);
-        probeViz.add(s);
+        const s = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({
+          metalness: 1.0, roughness: 0.08, envMap: pr.rt.texture, envMapIntensity: 1.0 }));
+        s.position.copy(pr.pos); probeViz.add(s);
       });
       scene.add(probeViz);
     }
 
-    // ── probe 갱신: 가까운 N개 + 라운드로빈 1개 (amortized) ──
     function updateProbes(diverPos) {
-      probeViz.visible = false;  // 시각화 구체가 캡처에 섞이지 않도록
-
-      // 거리순 정렬 후 가까운 것 선택
+      probeViz.visible = false;
       const order = probes.map((p, i) => ({ i, d: p.pos.distanceToSquared(diverPos) }))
                           .sort((a, b) => a.d - b.d);
       const set = new Set();
       for (let k = 0; k < Math.min(UPDATE_NEAR, order.length); k++) set.add(order[k].i);
-      set.add(rrCursor % probes.length); rrCursor++;   // 먼 probe도 천천히 갱신(잔상 방지)
-
+      set.add(rrCursor % probes.length); rrCursor++;
       set.forEach((i) => probes[i].cam.update(renderer, scene));
-
       probeViz.visible = probeViewOn;
     }
 
-    // ── 입력 ──────────────────────────────────────────────
+    // ── 입력 ──
     function setupInput() {
       addEventListener('keydown', (e) => {
         keys[e.code] = true;
         if (e.code === 'KeyG') toggleGI();
-        if (e.code === 'KeyP') toggleProbeView();
+        if (e.code === 'KeyV') toggleVis();
+        if (e.code === 'KeyP') toggleProbe();
         if (e.code === 'KeyH') hud.style.display = (hud.style.display === 'none') ? 'block' : 'none';
       });
       addEventListener('keyup', (e) => { keys[e.code] = false; });
-      const canvas = renderer.domElement;
-      canvas.addEventListener('click', () => canvas.requestPointerLock());
+      const c = renderer.domElement;
+      c.addEventListener('click', () => c.requestPointerLock());
       document.addEventListener('pointerlockchange', () => {
-        pointerLocked = (document.pointerLockElement === canvas);
+        pointerLocked = (document.pointerLockElement === c);
         document.getElementById('hint').classList.toggle('hidden', pointerLocked);
       });
       document.addEventListener('mousemove', (e) => {
@@ -340,44 +316,54 @@
     function toggleGI() {
       giEnabled = !giEnabled;
       giMaterials.forEach((m) => { m.envMapIntensity = giEnabled ? GI_INTENSITY : 0; });
-      const el = document.getElementById('giState');
-      el.textContent = giEnabled ? 'ON' : 'OFF';
-      el.className = giEnabled ? 'gi-on' : 'gi-off';
+      setBadge('giState', giEnabled);
     }
-    function toggleProbeView() {
-      probeViewOn = !probeViewOn;
-      probeViz.visible = probeViewOn;
+    function toggleVis() {
+      visAware = !visAware;
+      giMeshes.forEach((m) => { m.material.envMap = visAware ? m.userData.visTex : m.userData.naiveTex; });
+      setBadge('visState', visAware);
+    }
+    function toggleProbe() {
+      probeViewOn = !probeViewOn; probeViz.visible = probeViewOn;
       document.getElementById('probeView').textContent = probeViewOn ? 'ON' : 'OFF';
     }
+    function setBadge(id, on) {
+      const el = document.getElementById(id);
+      el.textContent = on ? 'ON' : 'OFF'; el.className = on ? 'on' : 'off';
+    }
 
-    // ── 업데이트 ──────────────────────────────────────────
+    // ── 업데이트 ──
     function update(dt) {
+      const prevX = diver.position.x;
       const speed = (keys['ShiftLeft'] || keys['ShiftRight']) ? 9 : 6;
-      const forward = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
-      const right = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
-      const move = new THREE.Vector3();
-      if (keys['KeyW']) move.add(forward);
-      if (keys['KeyS']) move.sub(forward);
-      if (keys['KeyD']) move.add(right);
-      if (keys['KeyA']) move.sub(right);
-      if (keys['Space']) move.y += 1;
-      if (keys['ControlLeft'] || keys['KeyC']) move.y -= 1;
-      if (move.lengthSq() > 0) { move.normalize().multiplyScalar(speed * dt); diver.position.add(move); }
+      const fwd = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
+      const rgt = new THREE.Vector3(Math.cos(yaw), 0, -Math.sin(yaw));
+      const mv = new THREE.Vector3();
+      if (keys['KeyW']) mv.add(fwd);
+      if (keys['KeyS']) mv.sub(fwd);
+      if (keys['KeyD']) mv.add(rgt);
+      if (keys['KeyA']) mv.sub(rgt);
+      if (keys['Space']) mv.y += 1;
+      if (keys['ControlLeft'] || keys['KeyC']) mv.y -= 1;
+      if (mv.lengthSq() > 0) { mv.normalize().multiplyScalar(speed*dt); diver.position.add(mv); }
 
       const h = { w: ROOM.w/2 - MARGIN, d: ROOM.d/2 - MARGIN };
       diver.position.x = THREE.MathUtils.clamp(diver.position.x, -h.w, h.w);
       diver.position.z = THREE.MathUtils.clamp(diver.position.z, -h.d, h.d);
       diver.position.y = THREE.MathUtils.clamp(diver.position.y, 1.0, ROOM.h - 1.0);
-      diver.children[0].position.y = Math.sin(performance.now() * 0.002) * 0.08;
 
+      // 칸막이 통과 차단 (출입구 밖이면 막음)
+      if (Math.abs(diver.position.x) < 0.6 && Math.abs(diver.position.z) > DOOR_HALF) {
+        diver.position.x = (prevX >= 0 ? 0.6 : -0.6);
+      }
+
+      diver.children[0].position.y = Math.sin(performance.now()*0.002) * 0.08;
       updateCamera(dt);
     }
-
     function updateCamera(dt) {
       const target = diver.position.clone().add(new THREE.Vector3(0, 0.6, 0));
       const dist = 7;
-      const dir = new THREE.Vector3(
-        Math.sin(yaw)*Math.cos(pitch), Math.sin(pitch), Math.cos(yaw)*Math.cos(pitch));
+      const dir = new THREE.Vector3(Math.sin(yaw)*Math.cos(pitch), Math.sin(pitch), Math.cos(yaw)*Math.cos(pitch));
       let desired = target.clone().add(dir.clone().multiplyScalar(dist));
       raycaster.set(target, dir); raycaster.far = dist;
       const hits = raycaster.intersectObjects(wallMeshes, false);
@@ -387,23 +373,20 @@
       camera.lookAt(target);
     }
 
-    // ── 루프 ──────────────────────────────────────────────
     function loop() {
       const dt = Math.min(clock.getDelta(), 0.05);
       update(dt);
       if (giEnabled) updateProbes(diver.position);
       renderer.render(scene, camera);
-      updateFPS(dt);
+      fps(dt);
     }
-    function updateFPS(dt) {
+    function fps(dt) {
       fpsAccum += dt; fpsFrames++; fpsTimer += dt;
-      if (fpsTimer >= 0.5) {
-        document.getElementById('fps').textContent = Math.round(fpsFrames / fpsAccum);
-        fpsAccum = 0; fpsFrames = 0; fpsTimer = 0;
-      }
+      if (fpsTimer >= 0.5) { document.getElementById('fps').textContent = Math.round(fpsFrames/fpsAccum);
+        fpsAccum = 0; fpsFrames = 0; fpsTimer = 0; }
     }
     function onResize() {
-      camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
+      camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
       renderer.setSize(innerWidth, innerHeight);
     }
 
